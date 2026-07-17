@@ -1,0 +1,9 @@
+[project]
+name = "ruc-courseselector"
+version = "0.1.0"
+description = "Local, session-based RUC course selection CLI"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "websocket-client>=1.8",
+]

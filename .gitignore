@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Private runtime data: browser session, selected courses and logs
+.data/
+artifacts/
+*.log
+
+#test
+test/
+tests/
