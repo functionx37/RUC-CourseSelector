@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -22,23 +23,102 @@ from .paths import BROWSER_PROFILE_DIR, ensure_data_dirs
 SITE_URL = "https://jw.ruc.edu.cn/Njw2017/index.html#/"
 
 
+def _is_wsl() -> bool:
+    """判断当前 Linux 进程是否运行在 WSL 中。"""
+    if platform.system() != "Linux":
+        return False
+    try:
+        kernel_release = Path("/proc/sys/kernel/osrelease").read_text(encoding="utf-8")
+    except OSError:
+        kernel_release = ""
+    return bool(os.environ.get("WSL_DISTRO_NAME")) or "microsoft" in kernel_release.lower()
+
+
+def _windows_path_to_wsl_path(windows_path: str) -> Path:
+    """将 Windows 路径转换为 WSL 可访问的挂载路径。"""
+    try:
+        result = subprocess.run(
+            ["wslpath", "-u", windows_path],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError("无法将 Windows 路径转换为 WSL 路径。") from error
+    converted = result.stdout.strip()
+    if not converted:
+        raise RuntimeError("无法读取 Windows 路径。")
+    return Path(converted)
+
+
+def _wsl_local_app_data() -> Path:
+    """返回 Windows 宿主机可读写的 LocalAppData 路径。"""
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        try:
+            result = subprocess.run(
+                ["cmd.exe", "/d", "/c", "echo", "%LOCALAPPDATA%"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise RuntimeError("无法读取 Windows 的 LOCALAPPDATA；请确认 WSL 互操作已启用。") from error
+        local_app_data = result.stdout.strip()
+    if not local_app_data or local_app_data == "%LOCALAPPDATA%":
+        raise RuntimeError("Windows 的 LOCALAPPDATA 未设置，无法为浏览器创建专用配置。")
+    return _windows_path_to_wsl_path(local_app_data)
+
+
+def browser_profile_dir() -> Path:
+    """返回当前浏览器可读写的专用配置目录。"""
+    if _is_wsl():
+        # Windows 浏览器未必有权限访问 /mnt 下的项目目录，因此不能复用项目内 .data。
+        return _wsl_local_app_data() / "RUC-CourseSelector" / "browser-profile"
+    return BROWSER_PROFILE_DIR
+
+
 def locate_browser() -> str:
     system = platform.system()
-    candidates = {
-        "Darwin": [
+    if _is_wsl():
+        local_app_data = _wsl_local_app_data()
+        candidates = [
+            "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe",
+            "/mnt/c/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+            local_app_data / "Google/Chrome/Application/chrome.exe",
+            "/mnt/c/Program Files/Microsoft/Edge/Application/msedge.exe",
+            "/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+            local_app_data / "Microsoft/Edge/Application/msedge.exe",
+        ]
+    else:
+        candidates = {
+            "Darwin": [
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-        ],
-        "Windows": [
-            os.path.expandvars(r"%PROGRAMFILES%\Google\Chrome\Application\chrome.exe"),
-            os.path.expandvars(r"%PROGRAMFILES(X86)%\Microsoft\Edge\Application\msedge.exe"),
-        ],
-        "Linux": ["google-chrome", "google-chrome-stable", "microsoft-edge", "chromium"],
-    }.get(system, [])
+            ],
+            "Windows": [
+                os.path.expandvars(r"%PROGRAMFILES%\Google\Chrome\Application\chrome.exe"),
+                os.path.expandvars(r"%PROGRAMFILES(X86)%\Google\Chrome\Application\chrome.exe"),
+                os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+                os.path.expandvars(r"%PROGRAMFILES%\Microsoft\Edge\Application\msedge.exe"),
+                os.path.expandvars(r"%PROGRAMFILES(X86)%\Microsoft\Edge\Application\msedge.exe"),
+                os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe"),
+            ],
+            "Linux": [
+                "google-chrome",
+                "google-chrome-stable",
+                "microsoft-edge",
+                "microsoft-edge-stable",
+                "chromium",
+                "chromium-browser",
+            ],
+        }.get(system, [])
     for candidate in candidates:
-        resolved = shutil.which(candidate) or candidate
+        resolved = shutil.which(str(candidate)) or str(candidate)
         if Path(resolved).is_file():
             return resolved
+    if _is_wsl():
+        raise FileNotFoundError("未找到 Windows 宿主机上的 Chrome 或 Edge，请先安装其中一个浏览器。")
     raise FileNotFoundError("未找到 Chrome 或 Edge，请先安装其中一个浏览器。")
 
 
@@ -48,18 +128,43 @@ class BrowserSession:
     debugger_port: int
 
     def close(self) -> None:
-        if self.process.poll() is None:
-            self.process.terminate()
+        """关闭本次启动的浏览器及其全部子进程。"""
+        if self.process.poll() is not None:
+            return
+        if platform.system() == "Windows" or _is_wsl():
             try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
+                # Windows Chrome/Edge 会派生多个进程；仅结束父进程可能留下窗口。
+                subprocess.run(
+                    ["taskkill.exe", "/PID", str(self.process.pid), "/T", "/F"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                self.process.terminate()
+        else:
+            try:
+                os.killpg(self.process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            if platform.system() == "Windows" or _is_wsl():
                 self.process.kill()
+            else:
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 def launch_browser(url: str = SITE_URL) -> BrowserSession:
-    """启动复用 .data/browser-profile 的独立浏览器窗口。"""
+    """启动复用专用配置目录的独立浏览器窗口。"""
     ensure_data_dirs()
-    active_port = BROWSER_PROFILE_DIR / "DevToolsActivePort"
+    profile_dir = browser_profile_dir()
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    active_port = profile_dir / "DevToolsActivePort"
     # 避免上次异常退出时遗留的端口文件被误认为新浏览器。
     active_port.unlink(missing_ok=True)
     process = subprocess.Popen(
@@ -67,7 +172,7 @@ def launch_browser(url: str = SITE_URL) -> BrowserSession:
             locate_browser(),
             "--remote-debugging-port=0",
             "--remote-allow-origins=*",
-            f"--user-data-dir={BROWSER_PROFILE_DIR}",
+            f"--user-data-dir={profile_dir}",
             "--new-window",
             "--no-first-run",
             "--no-default-browser-check",
@@ -76,6 +181,7 @@ def launch_browser(url: str = SITE_URL) -> BrowserSession:
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
+        start_new_session=True,
     )
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:

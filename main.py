@@ -6,7 +6,7 @@ import atexit
 import asyncio
 import logging
 
-from src.browser import SITE_URL, launch_browser
+from src.browser import SITE_URL, browser_profile_dir, launch_browser
 from src.capture import collect_targets
 from src.client import BrowserSessionCourseClient
 from src.paths import COMMAND_HISTORY_PATH, RUN_LOG_PATH, ensure_data_dirs
@@ -77,7 +77,7 @@ def login() -> None:
         input()
     finally:
         session.close()
-    print("登录会话已保存在 .data/browser-profile/。会话过期后请重新登录。")
+    print(f"登录会话已保存在 {browser_profile_dir()}。会话过期后请重新登录。")
 
 
 def collect(store: TargetStore, query_sessions: QuerySessionStore) -> None:
