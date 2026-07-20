@@ -96,12 +96,15 @@ def launch_browser(url: str = SITE_URL) -> BrowserSession:
 
 
 class NetworkMonitor:
-    """监听同一浏览器中所有页面，捕获请求但不落盘原始认证头。"""
+    """监听同一浏览器中所有页面的请求。"""
 
-    def __init__(self, debugger_port: int) -> None:
+    def __init__(self, debugger_port: int, *, capture_headers: bool = False) -> None:
         self.debugger_port = debugger_port
+        self.capture_headers = capture_headers
         self.requests: list[dict[str, Any]] = []
         self._connections: dict[str, WebSocket] = {}
+        self._request_records: dict[tuple[str, str], dict[str, Any]] = {}
+        self._pending_headers: dict[tuple[str, str], dict[str, str]] = {}
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -143,6 +146,7 @@ class NetworkMonitor:
                 continue
         for endpoint in self._connections.keys() - active:
             self._connections.pop(endpoint).close()
+            self._clear_page_state(endpoint)
 
     def _drain(self, endpoint: str, connection: WebSocket) -> None:
         while not self._stop.is_set():
@@ -152,14 +156,42 @@ class NetworkMonitor:
                 return
             except (OSError, WebSocketException, json.JSONDecodeError):
                 self._connections.pop(endpoint, None)
+                self._clear_page_state(endpoint)
                 return
-            if message.get("method") != "Network.requestWillBeSent":
-                continue
-            request = message["params"]["request"]
-            self.requests.append(
-                {
+            method = message.get("method")
+            params = message.get("params", {})
+            request_id = params.get("requestId")
+            key = (endpoint, str(request_id))
+            if method == "Network.requestWillBeSent":
+                request = params["request"]
+                record: dict[str, Any] = {
                     "url": request["url"],
                     "method": request["method"],
                     "body": request.get("postData"),
                 }
-            )
+                if self.capture_headers:
+                    record["headers"] = {
+                        **_string_headers(request.get("headers", {})),
+                        **self._pending_headers.pop(key, {}),
+                    }
+                    self._request_records[key] = record
+                self.requests.append(record)
+            elif method == "Network.requestWillBeSentExtraInfo" and self.capture_headers:
+                headers = _string_headers(params.get("headers", {}))
+                record = self._request_records.get(key)
+                if record is None:
+                    self._pending_headers[key] = headers
+                else:
+                    record.setdefault("headers", {}).update(headers)
+
+    def _clear_page_state(self, endpoint: str) -> None:
+        for key in [key for key in self._request_records if key[0] == endpoint]:
+            self._request_records.pop(key, None)
+        for key in [key for key in self._pending_headers if key[0] == endpoint]:
+            self._pending_headers.pop(key, None)
+
+
+def _string_headers(headers: object) -> dict[str, str]:
+    if not isinstance(headers, dict):
+        return {}
+    return {str(name): str(value) for name, value in headers.items()}

@@ -10,6 +10,7 @@ DATA_DIR = ROOT / ".data"
 BROWSER_PROFILE_DIR = DATA_DIR / "browser-profile"
 LOG_DIR = DATA_DIR / "logs"
 TARGETS_PATH = DATA_DIR / "targets.json"
+QUERY_SESSION_PATH = DATA_DIR / "query-session.json"
 RUN_LOG_PATH = LOG_DIR / "course-selector.log"
 COMMAND_HISTORY_PATH = DATA_DIR / "command-history"
 
