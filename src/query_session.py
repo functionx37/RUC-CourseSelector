@@ -13,7 +13,7 @@ from .paths import QUERY_SESSION_PATH, ensure_data_dirs
 
 @dataclass(frozen=True)
 class QueryTemplate:
-    """一条由浏览器实际发出的课程列表查询请求。"""
+    """一条由浏览器实际发出的、可安全重放的 JSON POST 模板。"""
 
     url: str
     body: str
@@ -34,33 +34,42 @@ class QueryTemplate:
 
 @dataclass(frozen=True)
 class QuerySession:
-    """按课程分类索引的余量查询模板。"""
+    """按课程分类索引的余量查询模板，以及真实选课提交模板。"""
 
     templates: dict[str, QueryTemplate]
+    submit_template: QueryTemplate | None = None
 
     def template_for(self, target: CourseTarget) -> QueryTemplate | None:
         category = target.payload.get("kclbMapper") or target.payload.get("kclbcode")
         return self.templates.get(str(category)) if category is not None else None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "version": 1,
+        result: dict[str, Any] = {
             "templates": {
                 category: template.to_dict() for category, template in self.templates.items()
             },
         }
+        if self.submit_template is not None:
+            result["submit_template"] = self.submit_template.to_dict()
+        return result
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "QuerySession":
         templates = value.get("templates")
         if not isinstance(templates, dict):
             raise ValueError("查询会话不含模板。")
+        submit_template_data = value.get("submit_template")
         return cls(
             {
                 str(category): QueryTemplate.from_dict(template)
                 for category, template in templates.items()
                 if isinstance(template, dict)
-            }
+            },
+            (
+                QueryTemplate.from_dict(submit_template_data)
+                if isinstance(submit_template_data, dict)
+                else None
+            ),
         )
 
 

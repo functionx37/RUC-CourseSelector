@@ -49,19 +49,6 @@ class RequestLimiter:
             await asyncio.sleep(delay)
 
 
-class UnconfiguredCourseClient:
-    """在余量响应协议确认前阻止真实 HTTP 请求的安全默认实现。"""
-
-    async def availability(self, target: CourseTarget) -> AvailabilityResult:
-        return AvailabilityResult(
-            Availability.UNKNOWN,
-            "尚未配置余量响应解析器；不会对教务系统发起自动请求。",
-        )
-
-    async def submit(self, target: CourseTarget) -> SubmissionResult:
-        return SubmissionResult(SubmitResult.UNKNOWN, "提交适配器尚未配置。")
-
-
 class BrowserSessionCourseClient:
     """使用 choose 时捕获的浏览器会话，读取课程列表中的实时余量。"""
 
@@ -111,9 +98,40 @@ class BrowserSessionCourseClient:
         return AvailabilityResult(status, message)
 
     async def submit(self, target: CourseTarget) -> SubmissionResult:
-        return SubmissionResult(SubmitResult.UNKNOWN, "提交响应协议尚未确认；不会发送选课请求。")
+        template = self.query_session.submit_template
+        if template is None:
+            return SubmissionResult(
+                SubmitResult.UNKNOWN,
+                "未捕获选课提交模板；请重新执行 choose 并手动点击目标课程。",
+            )
+        body = json.dumps(target.payload, ensure_ascii=False, separators=(",", ":"))
+        try:
+            status, response_body = await asyncio.to_thread(self._post, template, body)
+        except (RuntimeError, ValueError) as error:
+            return SubmissionResult(SubmitResult.UNKNOWN, str(error))
+        if status in (401, 403):
+            return SubmissionResult(SubmitResult.SESSION_EXPIRED, f"HTTP {status}")
+        if status != 200:
+            return SubmissionResult(SubmitResult.UNKNOWN, f"选课提交返回 HTTP {status}")
+        try:
+            response = json.loads(response_body)
+        except json.JSONDecodeError:
+            if _looks_like_login_page(response_body):
+                return SubmissionResult(SubmitResult.SESSION_EXPIRED, "提交被重定向至登录页面。")
+            return SubmissionResult(SubmitResult.UNKNOWN, "选课提交响应不是 JSON。")
+        if not isinstance(response, dict):
+            return SubmissionResult(SubmitResult.UNKNOWN, "选课提交响应格式异常。")
+        error_code = str(response.get("errorCode") or "")
+        message = str(response.get("errorMessage") or error_code)
+        if error_code == "success":
+            return SubmissionResult(SubmitResult.SUCCESS, message)
+        if error_code == "eywxt.save.cantXkByCopy.error":
+            return SubmissionResult(SubmitResult.ALREADY_SELECTED, message)
+        if _looks_like_session_error(error_code, message):
+            return SubmissionResult(SubmitResult.SESSION_EXPIRED, message)
+        return SubmissionResult(SubmitResult.UNKNOWN, f"选课提交失败：{message}")
 
-    def _post(self, template: QueryTemplate) -> tuple[int, str]:
+    def _post(self, template: QueryTemplate, body: str | None = None) -> tuple[int, str]:
         headers = {
             name: value
             for name, value in template.headers.items()
@@ -123,7 +141,7 @@ class BrowserSessionCourseClient:
         headers["Accept-Encoding"] = "identity"
         request = Request(
             template.url,
-            data=template.body.encode("utf-8"),
+            data=(template.body if body is None else body).encode("utf-8"),
             headers=headers,
             method="POST",
         )

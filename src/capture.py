@@ -51,7 +51,10 @@ def collect_targets(prompt: Callable[[str], str] = input) -> CaptureResult:
         if target.key not in seen:
             targets.append(target)
             seen.add(target.key)
-    return CaptureResult(targets, QuerySession(_query_templates(monitor.requests)))
+    return CaptureResult(
+        targets,
+        QuerySession(_query_templates(monitor.requests), _submit_template(monitor.requests)),
+    )
 
 
 def _query_templates(requests: list[dict[str, object]]) -> dict[str, QueryTemplate]:
@@ -74,3 +77,19 @@ def _query_templates(requests: list[dict[str, object]]) -> dict[str, QueryTempla
             headers={str(name): str(value) for name, value in headers.items()},
         )
     return templates
+
+
+def _submit_template(requests: list[dict[str, object]]) -> QueryTemplate | None:
+    """返回最后一次真实选课提交的 URL 与会话头；课程提交体另存于目标课程。"""
+    for request in reversed(requests):
+        if request.get("method") != "POST" or SAVE_ENDPOINT not in str(request.get("url")):
+            continue
+        headers = request.get("headers")
+        if not isinstance(headers, dict):
+            continue
+        return QueryTemplate(
+            url=str(request["url"]),
+            body="",
+            headers={str(name): str(value) for name, value in headers.items()},
+        )
+    return None

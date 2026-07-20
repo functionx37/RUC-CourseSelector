@@ -57,7 +57,7 @@ class CourseRunner:
                 return
 
             if submits >= self.config.max_submit_attempts:
-                self.logger.info("%s：达到本窗口提交上限，停止该课程。", target.class_name)
+                self.logger.info("%s：达到本次运行提交上限，停止该课程。", target.class_name)
                 return
 
             await self.limiter.wait()

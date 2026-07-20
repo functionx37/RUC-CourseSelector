@@ -9,6 +9,7 @@ import logging
 from src.browser import SITE_URL, browser_profile_dir, launch_browser
 from src.capture import collect_targets
 from src.client import BrowserSessionCourseClient
+from src.models import RunConfig
 from src.paths import COMMAND_HISTORY_PATH, RUN_LOG_PATH, ensure_data_dirs
 from src.query_session import QuerySessionStore
 from src.runner import CourseRunner
@@ -22,7 +23,7 @@ except ImportError:
 
 HELP_TEXT = """可用命令：
   login         启动专用浏览器，手动登录教务系统并保存浏览器会话。
-  choose        启动浏览器；采集目标课程、余量查询模板及当前会话。
+  choose        启动浏览器；采集目标课程、余量查询/提交模板及当前会话。
   list          显示待选课程，每行包含课程、教师和教学班信息。
   delete <编号> 删除 list 中对应编号的课程。
   run           在配置的时间窗内运行待选课程任务；Ctrl+C 可停止。
@@ -98,6 +99,8 @@ def collect(store: TargetStore, query_sessions: QuerySessionStore) -> None:
         if result.query_session.templates:
             query_sessions.save(result.query_session)
             print("余量查询会话已保存到 .data/query-session.json。")
+            if result.query_session.submit_template is None:
+                print("未捕获选课提交模板；run 不会提交。请重新 choose 并手动点击目标课程。")
         else:
             print("未捕获课程列表查询模板；run 无法查询余量。请重新 choose 并打开目标课程所属分类。")
 
@@ -145,15 +148,21 @@ def run(store: TargetStore, query_sessions: QuerySessionStore, logger: logging.L
     try:
         query_session = query_sessions.load()
     except ValueError:
-        print("余量查询会话文件无效。请重新执行 login 和 choose。")
+        print("余量查询会话文件无效。请重新执行 choose；若会话已过期，请先 login。")
         return
     if query_session is None:
         print("未找到余量查询会话。请先执行 choose，并在浏览器打开目标课程所属分类。")
         return
-    print(f"将监控 {min(len(targets), 5)} 门课程；Ctrl+C 可随时停止。")
-    print("将实时查询已选/最大人数；提交响应协议尚未确认，不会发送选课请求。")
+    if query_session.submit_template is None:
+        print("未找到选课提交模板。请重新执行 choose，并手动点击一次目标课程。")
+        return
+    config = RunConfig()
+    print(f"将监控 {min(len(targets), config.max_courses)} 门课程；Ctrl+C 可随时停止。")
+    print("将实时查询已选/最大人数；发现余量后会为每门课提交一次选课申请。")
     try:
-        asyncio.run(CourseRunner(BrowserSessionCourseClient(query_session), store, logger=logger).run(targets))
+        asyncio.run(
+            CourseRunner(BrowserSessionCourseClient(query_session), store, config, logger=logger).run(targets)
+        )
     except (asyncio.CancelledError, KeyboardInterrupt):
         logger.info("抢课任务被用户中断。")
         print("\n抢课任务已停止，已返回主菜单。")
