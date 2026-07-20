@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import atexit
 import asyncio
 import logging
 
 from src.browser import SITE_URL, launch_browser
 from src.capture import collect_targets
 from src.client import UnconfiguredCourseClient
-from src.paths import RUN_LOG_PATH, ensure_data_dirs
+from src.paths import COMMAND_HISTORY_PATH, RUN_LOG_PATH, ensure_data_dirs
 from src.runner import CourseRunner
 from src.targets import TargetStore
+
+try:
+    import readline
+except ImportError:
+    readline = None
 
 
 HELP_TEXT = """可用命令：
@@ -37,6 +43,29 @@ def configure_logging() -> logging.Logger:
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
     return logger
+
+
+def configure_command_history() -> None:
+    """启用左右编辑、上下历史命令，并持久化历史记录。"""
+    if readline is None:
+        return
+    ensure_data_dirs()
+    try:
+        readline.read_history_file(COMMAND_HISTORY_PATH)
+    except OSError:
+        # 目录可能由其他用户或受限环境创建；仍保留本次会话内的编辑和历史功能。
+        pass
+    readline.set_history_length(100)
+    atexit.register(save_command_history)
+
+
+def save_command_history() -> None:
+    if readline is None:
+        return
+    try:
+        readline.write_history_file(COMMAND_HISTORY_PATH)
+    except OSError:
+        pass
 
 
 def login() -> None:
@@ -108,12 +137,19 @@ def run(store: TargetStore, logger: logging.Logger) -> None:
     print("余量响应适配器尚未确认，因此当前框架不会自动向教务系统发送请求。")
     try:
         asyncio.run(CourseRunner(UnconfiguredCourseClient(), store, logger=logger).run(targets))
-    except KeyboardInterrupt:
-        print("\n已停止。")
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        logger.info("抢课任务被用户中断。")
+        print("\n抢课任务已停止，已返回主菜单。")
+    except Exception:
+        logger.exception("抢课任务异常结束。")
+        print(f"抢课任务异常结束，已返回主菜单。详情见日志：{RUN_LOG_PATH}")
+    else:
+        print("抢课任务已结束，已返回主菜单。")
 
 
 def main() -> None:
     logger = configure_logging()
+    configure_command_history()
     store = TargetStore()
     print("输入 help 以查看帮助。")
     while True:
