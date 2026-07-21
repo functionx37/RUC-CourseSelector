@@ -27,8 +27,7 @@ def collect_targets(prompt: Callable[[str], str] = input) -> CaptureResult:
     session = launch_browser(SITE_URL)
     monitor = NetworkMonitor(session.debugger_port, capture_headers=True)
     monitor.start()
-    print("请在浏览器进入选课页面，对目标课程点击一次选课。")
-    print("余量不足、已选或成功均可；请先打开目标课程所属分类以采集余量查询模板。")
+    print("请在浏览器中登录（若需要）并进入选课页面，对目标课程点击一次选课。")
     print("完成后回到此处按 Enter。")
     try:
         prompt("")

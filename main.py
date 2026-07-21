@@ -6,7 +6,6 @@ import atexit
 import asyncio
 import logging
 
-from src.browser import SITE_URL, browser_profile_dir, launch_browser
 from src.capture import collect_targets
 from src.client import BrowserSessionCourseClient
 from src.models import RunConfig
@@ -22,13 +21,14 @@ except ImportError:
 
 
 HELP_TEXT = """可用命令：
-  login         启动专用浏览器，手动登录教务系统并保存浏览器会话。
   choose        启动浏览器；采集目标课程、余量查询/提交模板及当前会话。
   list          显示待选课程，每行包含课程、教师和教学班信息。
   delete <编号> 删除 list 中对应编号的课程。
   run           在配置的时间窗内运行待选课程任务；Ctrl+C 可停止。
   exit          退出程序。
 """
+
+COMMANDS = ("choose", "list", "delete", "run", "exit", "help")
 
 
 def configure_logging() -> logging.Logger:
@@ -48,7 +48,7 @@ def configure_logging() -> logging.Logger:
 
 
 def configure_command_history() -> None:
-    """启用左右编辑、上下历史命令，并持久化历史记录。"""
+    """启用命令行编辑、历史记录和命令补全。"""
     if readline is None:
         return
     ensure_data_dirs()
@@ -58,7 +58,27 @@ def configure_command_history() -> None:
         # 目录可能由其他用户或受限环境创建；仍保留本次会话内的编辑和历史功能。
         pass
     readline.set_history_length(100)
+    readline.set_completer(complete_command)
+    try:
+        if "libedit" in (readline.__doc__ or "").lower():
+            readline.parse_and_bind("bind ^I rl_complete")
+        else:
+            readline.parse_and_bind("tab: complete")
+    except (AttributeError, ValueError):
+        # 极少数终端不支持 readline 绑定；仍可正常输入和执行命令。
+        pass
     atexit.register(save_command_history)
+
+
+def complete_command(text: str, state: int) -> str | None:
+    """仅在输入命令的第一个词时补全内置命令。"""
+    if readline is None or readline.get_line_buffer()[: readline.get_begidx()].strip():
+        return None
+    matches = [command for command in COMMANDS if command.startswith(text.lower())]
+    try:
+        return matches[state]
+    except IndexError:
+        return None
 
 
 def save_command_history() -> None:
@@ -68,17 +88,6 @@ def save_command_history() -> None:
         readline.write_history_file(COMMAND_HISTORY_PATH)
     except OSError:
         pass
-
-
-def login() -> None:
-    print("将启动专用浏览器。请在其中手动登录教务系统，并勾选“记住我”或类似选项。")
-    print("完成登录后回到此处按 Enter。")
-    session = launch_browser(SITE_URL)
-    try:
-        input()
-    finally:
-        session.close()
-    print(f"登录会话已保存在 {browser_profile_dir()}。会话过期后请重新登录。")
 
 
 def collect(store: TargetStore, query_sessions: QuerySessionStore) -> None:
@@ -98,7 +107,7 @@ def collect(store: TargetStore, query_sessions: QuerySessionStore) -> None:
     if confirmed:
         if result.query_session.templates:
             query_sessions.save(result.query_session)
-            print("余量查询会话已保存到 .data/query-session.json。")
+            print("余量查询会话已保存。")
             if result.query_session.submit_template is None:
                 print("未捕获选课提交模板；run 不会提交。请重新 choose 并手动点击目标课程。")
         else:
@@ -148,7 +157,7 @@ def run(store: TargetStore, query_sessions: QuerySessionStore, logger: logging.L
     try:
         query_session = query_sessions.load()
     except ValueError:
-        print("余量查询会话文件无效。请重新执行 choose；若会话已过期，请先 login。")
+        print("余量查询会话文件无效。请重新执行 choose；若需要登录，请在浏览器中完成登录。")
         return
     if query_session is None:
         print("未找到余量查询会话。请先执行 choose，并在浏览器打开目标课程所属分类。")
@@ -189,9 +198,7 @@ def main() -> None:
         if command in ("exit", "quit"):
             return
         try:
-            if command == "login":
-                login()
-            elif command == "choose":
+            if command == "choose":
                 collect(store, query_sessions)
             elif command == "list":
                 list_targets(store)
