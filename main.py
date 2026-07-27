@@ -106,9 +106,19 @@ def collect(store: TargetStore, query_sessions: QuerySessionStore) -> None:
                 print("该课程已在目标列表中。")
     if confirmed:
         if result.query_session.templates:
-            query_sessions.save(result.query_session)
+            try:
+                previous_session = query_sessions.load()
+            except ValueError:
+                # 损坏的旧会话不能安全复用；以本次浏览器采集的数据恢复。
+                previous_session = None
+            session_to_save = (
+                previous_session.merged_with(result.query_session)
+                if previous_session is not None
+                else result.query_session
+            )
+            query_sessions.save(session_to_save)
             print("余量查询会话已保存。")
-            if result.query_session.submit_template is None:
+            if session_to_save.submit_template is None:
                 print("未捕获选课提交模板；run 不会提交。请重新 choose 并手动点击目标课程。")
         else:
             print("未捕获课程列表查询模板；run 无法查询余量。请重新 choose 并打开目标课程所属分类。")
@@ -142,11 +152,21 @@ def delete_target(store: TargetStore, argument: str) -> None:
         print("用法：delete <编号>")
         return
     try:
-        removed = store.delete(int(argument) - 1)
+        index = int(argument) - 1
     except (ValueError, TypeError):
         print("请输入 list 中显示的有效课程编号。")
-    else:
-        print(f"已删除：{removed.class_name}")
+        return
+    targets = store.list()
+    if index < 0 or index >= len(targets):
+        print("请输入 list 中显示的有效课程编号。")
+        return
+    target = targets[index]
+    if input(f"确认删除 {target.class_name}？[y/N] ").strip().lower() not in ("y", "yes"):
+        print("已取消删除。")
+        return
+    removed = store.delete(index)
+    print(f"已删除：{removed.class_name}")
+    list_targets(store)
 
 
 def run(store: TargetStore, query_sessions: QuerySessionStore, logger: logging.Logger) -> None:

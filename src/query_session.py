@@ -43,6 +43,13 @@ class QuerySession:
         category = target.payload.get("kclbMapper") or target.payload.get("kclbcode")
         return self.templates.get(str(category)) if category is not None else None
 
+    def merged_with(self, newer: "QuerySession") -> "QuerySession":
+        """以较新的采集结果更新会话，同时保留未再次打开的课程分类。"""
+        return QuerySession(
+            {**self.templates, **newer.templates},
+            newer.submit_template or self.submit_template,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             "templates": {
